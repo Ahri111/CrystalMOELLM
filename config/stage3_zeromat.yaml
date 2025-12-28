@@ -1,0 +1,80 @@
+# Stage 3 ZeroMAT Training Config
+# Frozen MoE + Q-Former + 3 Losses
+
+model:
+  # MoE Configuration
+  use_moe: true
+  moe_extractor_dir: checkpoints/extractors
+  moe_topk_config: config/moe_topk.json
+
+  # Property list (12개)
+  property_list:
+    - band_gap
+    - formation_energy
+    - bulk_modulus
+    - shear_modulus
+    - elastic_anisotropy
+    - poisson_ratio
+    - total_magnetization
+    - n_Egap
+    - p_Egap
+    - n_mass
+    - p_mass
+    - eij_max
+
+  # Q-Former Configuration
+  num_query_token: 32
+  cross_attention_freq: 2
+
+  # LLM Configuration
+  llm_model: lmsys/vicuna-7b-v1.5
+  freeze_llm: true
+
+data:
+  train_file: data/train.json
+  val_file: data/val.json
+  test_file: data/test.json
+
+  # DataLoader
+  batch_size: 32
+  num_workers: 4
+
+  # Text processing
+  max_txt_len: 128
+
+training:
+  # Optimization
+  epochs: 50
+  lr: 1e-4
+  weight_decay: 0.05
+  warmup_steps: 1000
+
+  # Scheduler
+  lr_scheduler: linear_warmup_cosine_lr
+  min_lr: 1e-6
+
+  # Loss weights
+  loss_weights:
+    itc: 1.0   # Image-Text Contrastive
+    lm: 1.0    # Language Modeling
+    property: 1.0  # Property Prediction
+
+  # Checkpointing
+  save_dir: checkpoints/stage3
+  save_freq: 5
+
+  # Logging
+  log_freq: 100
+  eval_freq: 1
+
+# Frozen components
+freeze:
+  - moe_encoder
+  - llm_model
+
+# Trainable components
+trainable:
+  - qformer
+  - ln_graph
+  - llm_proj
+  - property_heads
