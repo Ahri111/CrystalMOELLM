@@ -57,6 +57,7 @@ def main(args):
         text_max_len=args.text_max_len,
         tokenizer=tokenizer,
         property_list=args.property_list,
+        target_property=args.target_property,  # NEW: single property mode
         args=args
     )
 

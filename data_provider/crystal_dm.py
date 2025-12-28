@@ -13,9 +13,10 @@ from .crystal_dataset import CrystalPropertyDataset, CrystalInferenceDataset
 class CrystalCollater:
     """Collate function for crystal graphs with property info"""
 
-    def __init__(self, tokenizer, text_max_len=128):
+    def __init__(self, tokenizer, text_max_len=128, target_property=None):
         self.tokenizer = tokenizer
         self.text_max_len = text_max_len
+        self.target_property = target_property
 
     def __call__(self, batch):
         """
@@ -31,26 +32,26 @@ class CrystalCollater:
         property_names = [item['property_name'] for item in batch]
         property_values = [item['property_value'] for item in batch]
 
+        if self.target_property:
+            # Single property mode: no filtering needed (all samples are same property)
+            main_property = self.target_property
+        else:
+            # Multi-property mode: filter to most common property
+            from collections import Counter
+            property_counts = Counter(property_names)
+            main_property = property_counts.most_common(1)[0][0]
+
+            # Filter to use only main property
+            filtered_indices = [i for i, pname in enumerate(property_names) if pname == main_property]
+
+            # Re-batch with filtered samples
+            if len(filtered_indices) < len(batch):
+                graphs = [graphs[i] for i in filtered_indices]
+                texts = [texts[i] for i in filtered_indices]
+                property_values = [property_values[i] for i in filtered_indices]
+
         # Batch graphs
         batched_graph = dgl.batch(graphs)
-
-        # Find most common property in batch
-        from collections import Counter
-        property_counts = Counter(property_names)
-        main_property = property_counts.most_common(1)[0][0]
-
-        # Filter to use only main property
-        filtered_indices = [i for i, pname in enumerate(property_names) if pname == main_property]
-
-        # Re-batch with filtered samples
-        if len(filtered_indices) < len(batch):
-            filtered_graphs = [graphs[i] for i in filtered_indices]
-            filtered_texts = [texts[i] for i in filtered_indices]
-            filtered_values = [property_values[i] for i in filtered_indices]
-
-            batched_graph = dgl.batch(filtered_graphs)
-            texts = filtered_texts
-            property_values = filtered_values
 
         # Tokenize texts
         text_batch = self.tokenizer(
@@ -87,6 +88,7 @@ class CrystalDM(LightningDataModule):
         text_max_len=128,
         tokenizer=None,
         property_list=None,
+        target_property=None,  # NEW: specific property to train on
         args=None,
     ):
         super().__init__()
@@ -95,6 +97,7 @@ class CrystalDM(LightningDataModule):
         self.num_workers = num_workers
         self.text_max_len = text_max_len
         self.tokenizer = tokenizer
+        self.target_property = target_property
 
         if property_list is None:
             property_list = [
@@ -107,14 +110,14 @@ class CrystalDM(LightningDataModule):
         # Create datasets
         if 'train' in mode:
             self.train_dataset = CrystalPropertyDataset(
-                train_path, property_list, tokenizer, text_max_len
+                train_path, property_list, tokenizer, text_max_len, target_property
             )
             self.val_dataset = CrystalPropertyDataset(
-                val_path, property_list, tokenizer, text_max_len
+                val_path, property_list, tokenizer, text_max_len, target_property
             )
         elif 'eval' in mode or 'test' in mode:
             self.test_dataset = CrystalPropertyDataset(
-                test_path, property_list, tokenizer, text_max_len
+                test_path, property_list, tokenizer, text_max_len, target_property
             )
 
     def train_dataloader(self):
@@ -125,7 +128,7 @@ class CrystalDM(LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             drop_last=True,
-            collate_fn=CrystalCollater(self.tokenizer, self.text_max_len),
+            collate_fn=CrystalCollater(self.tokenizer, self.text_max_len, self.target_property),
             persistent_workers=True if self.num_workers > 0 else False,
         )
 
@@ -137,7 +140,7 @@ class CrystalDM(LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             drop_last=False,
-            collate_fn=CrystalCollater(self.tokenizer, self.text_max_len),
+            collate_fn=CrystalCollater(self.tokenizer, self.text_max_len, self.target_property),
             persistent_workers=True if self.num_workers > 0 else False,
         )
 
@@ -149,7 +152,7 @@ class CrystalDM(LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             drop_last=False,
-            collate_fn=CrystalCollater(self.tokenizer, self.text_max_len),
+            collate_fn=CrystalCollater(self.tokenizer, self.text_max_len, self.target_property),
             persistent_workers=True if self.num_workers > 0 else False,
         )
 
@@ -162,4 +165,6 @@ class CrystalDM(LightningDataModule):
         parser.add_argument('--val_path', type=str, default='data/splits/val.json')
         parser.add_argument('--test_path', type=str, default='data/splits/test.json')
         parser.add_argument('--text_max_len', type=int, default=128)
+        parser.add_argument('--target_property', type=str, default=None,
+                            help='Specific property to train on (e.g., band_gap). If None, use all properties.')
         return parent_parser
