@@ -1,0 +1,30 @@
+# 12 Material Properties for ALIGNN MoE
+
+properties:
+  - band_gap
+  - formation_energy
+  - bulk_modulus
+  - shear_modulus
+  - elastic_anisotropy
+  - poisson_ratio
+  - total_magnetization
+  - n_Egap
+  - p_Egap
+  - n_mass
+  - p_mass
+  - eij_max
+
+# Property descriptions (for prompts)
+descriptions:
+  band_gap: "Band gap energy (eV)"
+  formation_energy: "Formation energy (eV/atom)"
+  bulk_modulus: "Bulk modulus (GPa)"
+  shear_modulus: "Shear modulus (GPa)"
+  elastic_anisotropy: "Elastic anisotropy"
+  poisson_ratio: "Poisson ratio"
+  total_magnetization: "Total magnetization (μB)"
+  n_Egap: "n-type band gap (eV)"
+  p_Egap: "p-type band gap (eV)"
+  n_mass: "n-type effective mass"
+  p_mass: "p-type effective mass"
+  eij_max: "Maximum piezoelectric constant"

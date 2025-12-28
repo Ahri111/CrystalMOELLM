@@ -91,10 +91,53 @@ class Blip2Qformer(Blip2Base):
         self.args = args
         self.tokenizer = self.init_tokenizer()
 
-        if args.use_3d:
+        # Graph encoder selection
+        if hasattr(args, 'use_moe') and args.use_moe:
+            # MoE encoder for crystals
+            from MoE.moe_encoder import FrozenMoEEncoder
+            self.graph_encoder = FrozenMoEEncoder(
+                extractor_dir=args.moe_extractor_dir,
+                topk_config_path=args.moe_topk_config,
+                property_list=args.property_list
+            )
+            self.ln_graph = nn.LayerNorm(self.graph_encoder.num_features)
+
+            # Property prediction heads
+            self.property_heads = nn.ModuleDict({
+                prop: nn.Sequential(
+                    nn.Linear(768, 256),  # Q-Former hidden → 256
+                    nn.ReLU(),
+                    nn.Dropout(0.1),
+                    nn.Linear(256, 1)
+                )
+                for prop in args.property_list
+            })
+
+            # Property prompts
+            self.property_prompts = {
+                'band_gap': 'Calculate the band gap energy:',
+                'formation_energy': 'Calculate the formation energy:',
+                'bulk_modulus': 'Calculate the bulk modulus:',
+                'shear_modulus': 'Calculate the shear modulus:',
+                'elastic_anisotropy': 'Calculate the elastic anisotropy:',
+                'poisson_ratio': 'Calculate the Poisson ratio:',
+                'total_magnetization': 'Calculate the total magnetization:',
+                'n_Egap': 'Calculate the n-type band gap:',
+                'p_Egap': 'Calculate the p-type band gap:',
+                'n_mass': 'Calculate the n-type effective mass:',
+                'p_mass': 'Calculate the p-type effective mass:',
+                'eij_max': 'Calculate the maximum piezoelectric constant:',
+            }
+
+            self.use_moe = True
+            logging.info("Using MoE encoder for crystals")
+
+        elif args.use_3d:
             self.graph_encoder, self.ln_graph, self.dictionary = self.init_unimol_encoder(args)
+            self.use_moe = False
         else:
             self.graph_encoder, self.ln_graph = self.init_graph_encoder(gin_num_layers, gin_hidden_dim, gin_drop_ratio)
+            self.use_moe = False
 
         self.tune_gnn = tune_gnn
         if not tune_gnn:
@@ -103,7 +146,7 @@ class Blip2Qformer(Blip2Base):
             self.graph_encoder = self.graph_encoder.eval()
             self.graph_encoder.train = disabled_train
             logging.info("freeze graph encoder")
-        
+
         self.Qformer, self.query_tokens = self.init_Qformer(bert_name, num_query_token, self.graph_encoder.num_features, cross_attention_freq)
 
         self.Qformer.resize_token_embeddings(len(self.tokenizer))
@@ -301,23 +344,71 @@ class Blip2Qformer(Blip2Base):
 
 
     def forward(self, batch):
-        ## for 3d forward
+        ## for 3d forward + MoE support
         device = self.device
-        graph_batch, text_batch = batch
-        batch_node, batch_mask = self.graph_encoder(*graph_batch)
+
+        # Unpack batch (with optional property info for MoE)
+        if self.use_moe and len(batch) == 3:
+            graph_batch, text_batch, property_info = batch
+        else:
+            graph_batch, text_batch = batch
+            property_info = None
+
+        # Graph encoding
+        if self.use_moe:
+            # MoE: pass property name for routing
+            batch_node, batch_mask = self.graph_encoder(graph_batch, property_info['property_name'])
+        else:
+            # Original: UniMol or GIN
+            batch_node, batch_mask = self.graph_encoder(*graph_batch)
+
         if not self.tune_gnn:
             batch_node = batch_node.detach()
         batch_size = batch_node.shape[0]
         batch_node = self.ln_graph(batch_node)
+
+        # Q-Former with optional property prompt
         query_tokens = self.query_tokens.expand(batch_node.shape[0], -1, -1)
-        query_output = self.Qformer.bert(
-            query_embeds=query_tokens,
-            encoder_hidden_states=batch_node,
-            encoder_attention_mask=batch_mask, # fixme: check whether this mask is correct
-            use_cache=True,
-            return_dict=True,
-        )
-        graph_feats = self.graph_proj(query_output.last_hidden_state) # shape = [B, num_q, D]
+        query_atts = torch.ones(query_tokens.size()[:-1], dtype=torch.long, device=device)
+
+        if self.use_moe and property_info is not None:
+            # Property-conditioned Q-Former
+            prompt_text = self.property_prompts[property_info['property_name']]
+            prompt_tokens = self.tokenizer(
+                [prompt_text] * batch_size,
+                return_tensors='pt',
+                padding=True,
+                add_special_tokens=True
+            ).to(device)
+
+            # Attention mask: [query | prompt]
+            attention_mask_qformer = torch.cat([query_atts, prompt_tokens.attention_mask], dim=1)
+
+            query_output = self.Qformer.bert(
+                input_ids=prompt_tokens.input_ids,
+                query_embeds=query_tokens,
+                attention_mask=attention_mask_qformer,
+                encoder_hidden_states=batch_node,
+                encoder_attention_mask=batch_mask,
+                use_cache=True,
+                return_dict=True,
+            )
+
+            # Extract query output only (exclude prompt tokens)
+            query_output_features = query_output.last_hidden_state[:, :query_tokens.size(1), :]
+        else:
+            # Original Q-Former
+            query_output = self.Qformer.bert(
+                query_embeds=query_tokens,
+                encoder_hidden_states=batch_node,
+                encoder_attention_mask=batch_mask,
+                use_cache=True,
+                return_dict=True,
+            )
+            query_output_features = query_output.last_hidden_state
+
+        # Projections
+        graph_feats = self.graph_proj(query_output_features) # shape = [B, num_q, D]
         text_output = self.Qformer.bert(text_batch.input_ids, attention_mask=text_batch.attention_mask, return_dict=True) # shape = [B, n_max, D]
         text_feats = self.text_proj(text_output.last_hidden_state[:, 0, :])
         
@@ -405,7 +496,7 @@ class Blip2Qformer(Blip2Base):
                 decoder_input_ids == self.tokenizer.pad_token_id, -100
             )
             query_atts = torch.ones(query_tokens.size()[:-1], dtype=torch.long, device=device)
-            
+
             attention_mask = torch.cat([query_atts, text_batch.attention_mask], dim=1)
             lm_output = self.Qformer(
                 decoder_input_ids,
@@ -417,8 +508,25 @@ class Blip2Qformer(Blip2Base):
 
             loss_lm = lm_output.loss
 
+        ##================= Property Prediction (MoE only) ========================##
+        loss_property = torch.tensor(0.0, device=device)
+        if self.use_moe and property_info is not None:
+            # Property-specific head
+            prop_name = property_info['property_name']
+            property_head = self.property_heads[prop_name]
+
+            # Query features (averaged)
+            query_mean = query_output_features.mean(dim=1)  # [B, 768]
+
+            # Prediction
+            prop_pred = property_head(query_mean).squeeze()  # [B]
+            prop_target = property_info['property_values']  # [B]
+
+            # L1 Loss
+            loss_property = F.l1_loss(prop_pred, prop_target)
+
         return BlipOutput(
-            loss=loss_gtc + loss_gtm + loss_lm,
+            loss=loss_gtc + loss_gtm + loss_lm + loss_property,
             loss_itc=loss_gtc,
             loss_itm=loss_gtm,
             loss_lm=loss_lm,
