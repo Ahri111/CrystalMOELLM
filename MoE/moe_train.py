@@ -189,6 +189,7 @@ def main(args):
         checkpoint_paths=args.checkpoint_paths,
         config_dict=model_config,
         freeze_extractors=not args.finetune_extractors,
+        num_layers_to_unfreeze=args.num_layers_to_unfreeze,
         device=device,
     )
 
@@ -266,21 +267,44 @@ def main(args):
     # Loss and optimizer
     criterion = nn.MSELoss()
 
-    # Only optimize MOE parameters (not frozen extractors)
+    # Setup optimizer with different learning rates for different parts
+    param_groups = []
+
+    # 1. MOE-specific parameters (scaling, gating, MLP head)
     if isinstance(model, MultiheadedMixtureOfExpertsModel):
         # Use non_extractor_parameters() for multiheaded MOE
-        optimizer = optim.AdamW(
-            model.non_extractor_parameters(),
-            lr=args.learning_rate,
-            weight_decay=args.weight_decay,
-        )
+        param_groups.append({
+            'params': model.non_extractor_parameters(),
+            'lr': args.learning_rate,
+        })
     else:
-        # For ensemble, filter trainable parameters
-        optimizer = optim.AdamW(
-            filter(lambda p: p.requires_grad, model.parameters()),
-            lr=args.learning_rate,
-            weight_decay=args.weight_decay,
-        )
+        # For ensemble, get non-extractor parameters
+        non_extractor_params = [
+            p for n, p in model.named_parameters()
+            if p.requires_grad and 'extractors' not in n
+        ]
+        param_groups.append({
+            'params': non_extractor_params,
+            'lr': args.learning_rate,
+        })
+
+    # 2. Unfrozen extractor layers (with lower learning rate)
+    if args.num_layers_to_unfreeze > 0:
+        extractor_params = [
+            p for n, p in model.named_parameters()
+            if p.requires_grad and 'extractors' in n
+        ]
+        if len(extractor_params) > 0:
+            param_groups.append({
+                'params': extractor_params,
+                'lr': args.extractor_lr,  # Lower LR for fine-tuning
+            })
+            print(f"Fine-tuning {len(extractor_params)} extractor parameters with LR={args.extractor_lr}")
+
+    optimizer = optim.AdamW(
+        param_groups,
+        weight_decay=args.weight_decay,
+    )
 
     scheduler = ReduceLROnPlateau(
         optimizer,
@@ -409,6 +433,10 @@ if __name__ == '__main__':
                         help='Paths to pretrained model checkpoints')
     parser.add_argument('--finetune_extractors', action='store_true',
                         help='Fine-tune extractor parameters (default: freeze)')
+    parser.add_argument('--num_layers_to_unfreeze', type=int, default=0,
+                        help='Number of extractor layers to unfreeze from the end (0=all frozen)')
+    parser.add_argument('--extractor_lr', type=float, default=5e-4,
+                        help='Learning rate for fine-tuning extractors (default: 5e-4)')
 
     # Target dataset
     parser.add_argument('--target_csv', type=str, required=True,

@@ -10,6 +10,7 @@ from .model import (
 )
 
 from .utils import (
+    get_alignn_parameters_to_finetune,
     load_pretrained_extractors,
     save_pretrained_model_info,
     load_pretrained_model_info,
@@ -24,6 +25,7 @@ __all__ = [
     'MultiheadedMixtureOfExpertsModel',
     'EnsembleModel',
     'MultilayerPerceptronHead',
+    'get_alignn_parameters_to_finetune',
     'load_pretrained_extractors',
     'save_pretrained_model_info',
     'load_pretrained_model_info',

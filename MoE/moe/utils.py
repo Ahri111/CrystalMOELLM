@@ -8,10 +8,74 @@ import pickle
 from ..alignn.model import ALIGNNRegression, ALIGNNExtractor
 
 
+def get_alignn_parameters_to_finetune(extractor, num_layers_to_unfreeze):
+    """
+    Get parameters to fine-tune from ALIGNN extractor (unfreeze from the end)
+
+    Args:
+        extractor: ALIGNNExtractor
+        num_layers_to_unfreeze: Number of layers to unfreeze from the end
+
+    Returns:
+        trainable_params: List of parameters to fine-tune
+    """
+    # First freeze all
+    for p in extractor.parameters():
+        p.requires_grad = False
+
+    trainable_params = []
+    layers_unfrozen = 0
+
+    # Unfreeze from the end: GCN layers -> ALIGNN layers -> embeddings
+
+    # 1. GCN layers (from the end)
+    if hasattr(extractor.alignn, 'gcn_layers'):
+        for i in range(len(extractor.alignn.gcn_layers) - 1, -1, -1):
+            if layers_unfrozen >= num_layers_to_unfreeze:
+                break
+
+            gcn_layer = extractor.alignn.gcn_layers[i]
+            trainable_params.extend(list(gcn_layer.parameters()))
+            layers_unfrozen += 1
+            print(f'    UNFROZE gcn_layers[{i}]')
+
+    # 2. ALIGNN layers (from the end)
+    if hasattr(extractor.alignn, 'alignn_layers'):
+        for i in range(len(extractor.alignn.alignn_layers) - 1, -1, -1):
+            if layers_unfrozen >= num_layers_to_unfreeze:
+                break
+
+            alignn_layer = extractor.alignn.alignn_layers[i]
+            trainable_params.extend(list(alignn_layer.parameters()))
+            layers_unfrozen += 1
+            print(f'    UNFROZE alignn_layers[{i}]')
+
+    # 3. Edge embedding
+    if layers_unfrozen < num_layers_to_unfreeze:
+        if hasattr(extractor.alignn, 'edge_embedding'):
+            trainable_params.extend(list(extractor.alignn.edge_embedding.parameters()))
+            layers_unfrozen += 1
+            print(f'    UNFROZE edge_embedding')
+
+    # 4. Atom embedding
+    if layers_unfrozen < num_layers_to_unfreeze:
+        if hasattr(extractor.alignn, 'atom_embedding'):
+            trainable_params.extend(list(extractor.alignn.atom_embedding.parameters()))
+            layers_unfrozen += 1
+            print(f'    UNFROZE atom_embedding')
+
+    # Set requires_grad
+    for p in trainable_params:
+        p.requires_grad = True
+
+    return trainable_params
+
+
 def load_pretrained_extractors(
     checkpoint_paths,
     config_dict=None,
     freeze_extractors=True,
+    num_layers_to_unfreeze=0,
     device='cpu',
 ):
     """
@@ -21,6 +85,7 @@ def load_pretrained_extractors(
         checkpoint_paths: List of paths to pretrained .pt files
         config_dict: Configuration for ALIGNN model
         freeze_extractors: Whether to freeze extractor parameters
+        num_layers_to_unfreeze: Number of layers to unfreeze from the end (if > 0)
         device: Device to load models to
 
     Returns:
@@ -57,7 +122,15 @@ def load_pretrained_extractors(
         if freeze_extractors:
             for param in extractor.parameters():
                 param.requires_grad = False
-            print(f"  Extractor {i+1} frozen")
+
+            # Unfreeze some layers if requested
+            if num_layers_to_unfreeze > 0:
+                print(f"  Unfreezing {num_layers_to_unfreeze} layers:")
+                get_alignn_parameters_to_finetune(extractor, num_layers_to_unfreeze)
+            else:
+                print(f"  Extractor {i+1} frozen")
+        else:
+            print(f"  Extractor {i+1} unfrozen (all layers trainable)")
 
         extractors.append(extractor)
 
